@@ -67,9 +67,17 @@ const (
 )
 
 var (
-	ipv4Proto = map[string]string{"ip": "ip4:icmp", "udp": "udp4"}
-	ipv6Proto = map[string]string{"ip": "ip6:ipv6-icmp", "udp": "udp6"}
+	ipv4Proto      = map[string]string{"ip": "ip4:icmp", "udp": "udp4"}
+	ipv6Proto      = map[string]string{"ip": "ip6:ipv6-icmp", "udp": "udp6"}
+	readBufferPool sync.Pool
 )
+
+func init() {
+	readBufferPool.New = func() interface{} {
+		buf := make([]byte, 512)
+		return &buf
+	}
+}
 
 // NewPinger returns a new Pinger struct pointer
 func NewPinger(addr string) (*Pinger, error) {
@@ -414,25 +422,28 @@ func (p *Pinger) recvICMP(
 		case <-p.done:
 			return
 		default:
-			bytes := make([]byte, 512)
+			bytes := readBufferPool.Get().(*[]byte)
+
 			conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 			var n, ttl int
 			var err error
 			if p.ipv4 {
 				var cm *ipv4.ControlMessage
-				n, cm, _, err = conn.IPv4PacketConn().ReadFrom(bytes)
+				n, cm, _, err = conn.IPv4PacketConn().ReadFrom(*bytes)
 				if cm != nil {
 					ttl = cm.TTL
 				}
 			} else {
 				var cm *ipv6.ControlMessage
-				n, cm, _, err = conn.IPv6PacketConn().ReadFrom(bytes)
+				n, cm, _, err = conn.IPv6PacketConn().ReadFrom(*bytes)
 				if cm != nil {
 					ttl = cm.HopLimit
 				}
 			}
 			if err != nil {
 				if neterr, ok := err.(*net.OpError); ok {
+					readBufferPool.Put(bytes)
+
 					if neterr.Timeout() {
 						// Read timeout
 						continue
@@ -444,8 +455,9 @@ func (p *Pinger) recvICMP(
 			}
 			select {
 			case <-p.done:
+				readBufferPool.Put(bytes)
 				return
-			case recv <- &packet{bytes: bytes, nbytes: n, ttl: ttl}:
+			case recv <- &packet{bytes: *bytes, nbytes: n, ttl: ttl}:
 			}
 		}
 	}
